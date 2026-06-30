@@ -62,4 +62,19 @@ Hobby only allows **one daily cron job**. For auto-settlement every 5 min, eithe
 - Pubkey: `4mE8UiN1eyTPB2Gcw5R8XTHibpSD58fTwHpP2BypTHT2`
 - Funded with 2 SOL on devnet (from main wallet `8PGCeFVR79qBzqEc2vTDTJx3TaJ9jhYe7AhrtJkwdVrv`)
 - The JSON array (secret key) is set as `PAYER_SECRET_KEY` in Vercel production env vars.
+
+## Auto-settlement
+The keeper runs via **pg_cron** inside Supabase Postgres every 5 minutes:
+- **Schedule**: `*/5 * * * *` (job name: `keeper-settlement`)
+- **Flow**: pg_cron → `net.http_post()` → Supabase Edge Function `keeper` → `POST /api/keeper/settle` (Vercel) → `settleActiveEscrows()`
+- **Extensions**: `pg_cron` + `pg_net` installed on the Supabase project
+- **SQL** (already applied):
+  ```sql
+  SELECT cron.schedule(
+    'keeper-settlement', '*/5 * * * *',
+    $$SELECT net.http_post(url:='https://...supabase.co/functions/v1/keeper', ...)$$
+  );
+  ```
+- The Supabase Edge Function (`supabase/functions/keeper/`) proxies to Vercel with no extra auth
+- If `TXLINE_API_TOKEN` env var is empty, the keeper auto-subscribes on-chain via `keeper-auth.ts`
 <!-- END:deploy-rules -->
