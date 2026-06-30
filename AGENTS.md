@@ -25,8 +25,23 @@ Check `.env.example` for the full list. Key ones:
 - `NEXT_PUBLIC_SOLANA_RPC` — Solana RPC endpoint
 - `NEXT_PUBLIC_TXLINE_API_URL` — TxLINE API base URL
 - `TXLINE_JWT` — TxLINE JWT for keeper bot
+- `TXLINE_API_TOKEN` — TxLINE API token for keeper bot
 - `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase
-- `PAYER_SECRET_KEY` — keeper bot payer keypair
+- `PAYER_SECRET_KEY` — keeper bot payer keypair (JSON array of numbers)
+- `KEEPER_SECRET` — optional bearer token to authenticate manual keeper triggers
+
+## Keeper Bot (auto-settlement)
+The keeper bot runs as a Vercel Cron Job every 5 minutes:
+- **Route**: `POST /api/keeper/settle` (or `GET` with `x-vercel-cron: 1`)
+- **Config**: `vercel.json` — `crons` array with schedule `*/5 * * * *`
+- **Logic**: `src/lib/keeper.ts` — fetches all Active escrows, resolves fixtureId by name via TxLINE, checks if finished (StatusId 5/10/13), gets scores + validation proofs, calls `settle_with_cpi`
+- **Auth**: Cron requests include `x-vercel-cron: 1` header; manual requests need `Authorization: Bearer ${KEEPER_SECRET}`
+
+### Manual trigger
+```bash
+curl -X POST https://worldcup-hackathon.vercel.app/api/keeper/settle \
+  -H "Authorization: Bearer <KEEPER_SECRET>"
+```
 
 ## Build flow
 1. `git add -A && git commit -m "..."` (if changes)
