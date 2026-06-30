@@ -56,4 +56,10 @@ Hobby only allows **one daily cron job**. For auto-settlement every 5 min, eithe
 - `eslint` key in `next.config.ts` is not supported in Next.js 16 — use `.eslintrc` instead.
 - Solana wallet adapter packages need `transpilePackages` in config.
 - The Anchor IDL in `src/idl/settlement.json` must match the deployed program.
+
+## Keeper keypair
+- Local file: `~/.config/solana/keeper-kp.json`
+- Pubkey: `4mE8UiN1eyTPB2Gcw5R8XTHibpSD58fTwHpP2BypTHT2`
+- Funded with 2 SOL on devnet (from main wallet `8PGCeFVR79qBzqEc2vTDTJx3TaJ9jhYe7AhrtJkwdVrv`)
+- The JSON array (secret key) is set as `PAYER_SECRET_KEY` in Vercel production env vars.
 <!-- END:deploy-rules -->
