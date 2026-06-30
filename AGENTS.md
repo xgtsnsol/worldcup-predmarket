@@ -3,3 +3,37 @@
 
 This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
 <!-- END:nextjs-agent-rules -->
+
+<!-- BEGIN:deploy-rules -->
+# Vercel Deployment
+
+This project is linked to Vercel project **worldcup-hackathon** (`prj_yFXg8jqEt2W0C0w45lE7i0XoZ9Bc`).
+
+## Deploy command
+```bash
+bun run deploy
+# or directly: vercel --prod --yes
+```
+
+## Production URLs
+- Primary: https://worldcup-hackathon.vercel.app
+- Preview: https://worldcup-hackathon-mnoi5vii6-erick-carvajal-s-projects.vercel.app
+- Vercel dashboard: https://vercel.com/erick-carvajal-s-projects/worldcup-hackathon
+
+## Env vars required (set in Vercel dashboard)
+Check `.env.example` for the full list. Key ones:
+- `NEXT_PUBLIC_SOLANA_RPC` — Solana RPC endpoint
+- `NEXT_PUBLIC_TXLINE_API_URL` — TxLINE API base URL
+- `TXLINE_JWT` — TxLINE JWT for keeper bot
+- `NEXT_PUBLIC_SUPABASE_URL` + `NEXT_PUBLIC_SUPABASE_ANON_KEY` — Supabase
+- `PAYER_SECRET_KEY` — keeper bot payer keypair
+
+## Build flow
+1. `git add -A && git commit -m "..."` (if changes)
+2. `bun run deploy` — auto-detects Next.js, builds with Turbopack, deploys
+
+## Known issues
+- `eslint` key in `next.config.ts` is not supported in Next.js 16 — use `.eslintrc` instead.
+- Solana wallet adapter packages need `transpilePackages` in config.
+- The Anchor IDL in `src/idl/settlement.json` must match the deployed program.
+<!-- END:deploy-rules -->
