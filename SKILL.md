@@ -11,7 +11,7 @@ license: MIT
 compatibility: Requires Node.js 18+, @coral-xyz/anchor, @solana/web3.js, @solana/spl-token, axios, tweetnacl
 metadata:
   author: TxODDS
-  version: 2.0.0
+  version: 2.1.0
 ---
 
 # TxLINE Skill
@@ -27,6 +27,7 @@ Use this Skill when the user asks for:
 - **Faucet USDT en devnet** — reclamar USDT gratis del programa TxLINE
 - Comprar tokens TxL con USDT para suscripciones pagas
 - Integrar datos del Mundial 2026 y ligas internacionales
+- **Auto-settlement (keeper)**: liquidar apuestas automáticamente cuando un partido termina
 
 ## Architecture
 
@@ -40,9 +41,10 @@ TxLINE es un sistema **híbrido on-chain / off-chain**:
    │ GET /api/fixtures/snapshot │        │ validateStat()             │
    │ GET /api/odds/snapshot/:id │        │ validateOdds()             │
    │ GET /api/scores/stream     │        │ validateFixture()          │
-   │ ...                        │        │ request_devnet_faucet()    │
-   └──────────┬─────────────────┘        └──────────┬──────────────────┘
-              │                                     │
+   │ GET /api/scores/snapshot   │        │ request_devnet_faucet()    │
+   │ GET /api/fixtures/validation│       └──────────┬──────────────────┘
+   │ ...                        │                   │
+   └──────────┬─────────────────┘                   │
               └─────────── Merkle proofs ────────────┘
 ```
 
@@ -70,6 +72,236 @@ TxLINE es un sistema **híbrido on-chain / off-chain**:
 | TxL Token Mint | `4Zao8ocPhmMgq7PdsYWyxvqySMGx7xb9cMftPMkEokRG` |
 | USDT Mint | `ELWTKspHKCnCfCiCiqYw1EDH77k8VCP74dK9qytG2Ujh` |
 | API Endpoint | `https://txline-dev.txodds.com/api/` |
+
+---
+
+## Scores Message Format (Fusion Feed)
+
+Cada mensaje del endpoint `/scores` o del SSE stream tiene esta estructura:
+
+```typescript
+{
+  FixtureInfo: {
+    FixtureId: number,          // 14790158
+    Participant1: string,       // "F.C Barcelona"
+    Participant2: string,       // "Liverpool"
+    Participant1Id: number,
+    Participant2Id: number,
+    Participant1IsHome: boolean,
+    Competition: string,        // "Champions League"
+    CompetitionId: number,
+    FixtureGroupId: number,
+    FixtureGroup: string,
+    StartTime: string,          // "2024-06-08T21:00:00Z"
+    GameState: string,          // "scheduled"
+    IsTeam: boolean,
+    SportId: number,
+    Sport: string,              // "soccer"
+    CountryId: number,
+    Country: string,
+  },
+  Update: {
+    Action: string,             // "kickoff" | "goal" | "status" | "corner" | ...
+    StatusId: number,           // 2=H1, 4=H2, 5=F, etc.
+    Confirmed?: boolean,
+    Data?: {
+      StatusName?: string,      // "H1", "H2", "HT", etc.
+      Participant?: number,     // which team (1 or 2)
+      Minutes?: number,         // additional time
+      PlayerId?: number,
+      Outcome?: string,
+      GoalType?: string,
+      ...
+    },
+    Clock: {
+      Running: boolean,          // is clock counting down?
+      Seconds: number,           // seconds remaining in current period
+    },
+    Score?: {
+      Participant1: ScoreParticipant,
+      Participant2: ScoreParticipant,
+    },
+    FixtureId: number,           // same as FixtureInfo.FixtureId
+    Seq: number,                 // update sequence number
+    Id: number,                  // action ID
+    GlobalSeq: number,
+    Ts: number,                  // timestamp (ms)
+    ServerId: string,
+  }
+}
+```
+
+### ScoreParticipant
+
+```typescript
+{
+  H1?: ScoreParticipantPeriod,   // 1st half
+  H2?: ScoreParticipantPeriod,   // 2nd half
+  HT?: ScoreParticipantPeriod,   // up to halftime
+  ET1?: ScoreParticipantPeriod,  // extra time 1st half
+  ET2?: ScoreParticipantPeriod,  // extra time 2nd half
+  ETTotal?: ScoreParticipantPeriod,
+  PE?: ScoreParticipantPeriod,   // penalties
+  Total?: ScoreParticipantPeriod, // sum of all periods
+}
+
+interface ScoreParticipantPeriod {
+  Goals: number;
+  Corners: number;
+  RedCards: number;
+  YellowCards: number;
+}
+```
+
+**Importante**: `FixtureInfo` normalmente aparece solo en el primer mensaje de un fixture. Los mensajes posteriores pueden contener solo `Update` (con `FixtureId`). Por eso se **cachea** `FixtureInfo` por `fixtureId`.
+
+---
+
+## StatusId Table
+
+El campo `StatusId` representa la fase actual del partido:
+
+| Id | Name | Game Phase | Is Live | Is Finished |
+|----|------|-----------|---------|-------------|
+| 1 | NS | Not Started | — | — |
+| 2 | H1 | 1st Half | ✅ | — |
+| 3 | HT | Half Time | ✅ | — |
+| 4 | H2 | 2nd Half | ✅ | — |
+| 5 | F | Finished (Full-Time) | — | ✅ |
+| 6 | WET | Waiting for Extra Time | — | — |
+| 7 | ET1 | 1st Half Extra Time | ✅ | — |
+| 8 | HTET | HT Extra Time | ✅ | — |
+| 9 | ET2 | 2nd Half Extra Time | ✅ | — |
+| 10 | FET | Finished (After ET) | — | ✅ |
+| 11 | WPE | Waiting for Penalty Shootout | — | — |
+| 12 | PE | Penalty Shootout | ✅ | — |
+| 13 | FPE | Finished (After Penalties) | — | ✅ |
+| 14 | I | Interrupted | — | — |
+| 15 | A | Abandoned | — | — |
+| 16 | C | Cancelled | — | — |
+| 17 | TXCC | TX Coverage Cancelled | — | — |
+| 18 | TXCS | TX Coverage Suspended | — | — |
+| 19 | P | Postponed | — | — |
+
+**Código de referencia** (`src/app/live/page.tsx`):
+
+```typescript
+const STATUS_NAMES: Record<number, string> = {
+  1: 'NS', 2: 'H1', 3: 'HT', 4: 'H2', 5: 'F',
+  6: 'WET', 7: 'ET1', 8: 'HTET', 9: 'ET2', 10: 'FET',
+  11: 'WPE', 12: 'PE', 13: 'FPE', 14: 'I', 15: 'A',
+  16: 'C', 17: 'TXCC', 18: 'TXCS', 19: 'P',
+};
+
+const LIVE_STATUS_IDS = new Set([2, 4, 7, 9, 12]);
+const FINISHED_STATUS_IDS = new Set([5, 10, 13]);
+```
+
+---
+
+## Minute Calculation
+
+El campo `Clock.Seconds` indica los **segundos restantes** del período actual.
+
+```typescript
+function getPeriodSeconds(statusId: number): number {
+  if (statusId >= 7 && statusId <= 9) return 900;   // ET: 15 min
+  return 2700;                                        // halves: 45 min
+}
+
+function computeMinute(statusId: number, clockSeconds: number): number {
+  return Math.max(0, Math.floor((getPeriodSeconds(statusId) - clockSeconds) / 60));
+}
+```
+
+Ejemplo: Si `StatusId=4` (H2) y `Clock.Seconds=1800`, entonces `(2700-1800)/60 = 15'`.
+
+---
+
+## Score Parsing (SSE / REST)
+
+El SSE stream (`/api/scores/stream`) envía JSON línea por línea con prefijo `data:`. La función `normalizeScoreEvent` extrae los campos anidados:
+
+```typescript
+function normalizeScoreEvent(raw: any, cache: Map<number, any>): any {
+  const info = raw.FixtureInfo || {};
+  const upd = raw.Update || {};
+  const fixtureId = info.FixtureId ?? upd.FixtureId ?? raw.FixtureId;
+  if (fixtureId == null) return null;
+
+  // Cache fixture metadata for future Update-only messages
+  if (info.FixtureId != null) cache.set(fixtureId, info);
+  const cached = cache.get(fixtureId) || {};
+
+  const statusId = upd.StatusId ?? info.StatusId ?? 2;
+  const clock = upd.Clock || {};
+  const minute = clock.Seconds != null
+    ? Math.max(0, Math.floor((getPeriodSeconds(statusId) - clock.Seconds) / 60))
+    : 0;
+
+  const score = upd.Score || {};
+  return {
+    FixtureId: fixtureId,
+    Participant1: info.Participant1 ?? cached.Participant1 ?? 'Local',
+    Participant2: info.Participant2 ?? cached.Participant2 ?? 'Visitante',
+    Score1: score.Participant1?.Total?.Goals ?? 0,
+    Score2: score.Participant2?.Total?.Goals ?? 0,
+    Minute: minute,
+    Status: upd.Data?.StatusName ?? STATUS_NAMES[statusId] ?? 'LIVE',
+    StatusId: statusId,
+  };
+}
+```
+
+**Archivo**: `src/app/live/page.tsx`
+
+---
+
+## Keeper Bot (Auto-Settlement)
+
+### Flujo completo
+
+```
+1. Fetch ALL escrows del programa settlement (gPA con escrow discriminator)
+2. Filtrar solo los Active
+3. Para cada Active, resolver fixtureId desde el nombre:
+   a. Fetch /api/fixtures/snapshot → build name→fixtureId map
+   b. Match normalized participant names
+4. Si StatusId ∈ [5, 10, 13] (finished):
+   a. GET /api/scores/snapshot/{fixtureId} → final Score1, Score2
+   b. GET /api/fixtures/validation?fixtureId=X → { snapshot, summary, subTreeProof, mainTreeProof }
+   c. Construir tx settle_with_cpi con todos los datos
+   d. Enviar y confirmar
+```
+
+### Fuentes de datos
+
+| Endpoint | Propósito |
+|----------|-----------|
+| `GET /api/fixtures/snapshot` | Obtener todos los fixtures y sus StatusId |
+| `GET /api/fixtures/validation?fixtureId=X` | Merkle proofs del fixture |
+| `GET /api/scores/snapshot/{fixtureId}` | Scores finales del fixture |
+
+### Archivos
+
+| Archivo | Rol |
+|---------|-----|
+| `src/lib/keeper.ts` | Lógica: fetch escrows, validar fixture, settle |
+| `src/app/api/keeper/settle/route.ts` | Endpoint Vercel (POST + GET cron) |
+| `vercel.json` | Config cron `*/5 * * * *` (requiere Pro) |
+
+### Manual trigger
+
+```bash
+curl -X POST https://worldcup-hackathon.vercel.app/api/keeper/settle \
+  -H "Authorization: Bearer <KEEPER_SECRET>"
+```
+
+### Vercel Hobby limit
+
+Hobby = 1 cron/día. Para settlement cada 5 min: upgrade a Pro o usar Supabase Edge Function.
+
+---
 
 ## Program Instructions (Anchor IDL)
 
@@ -121,12 +353,6 @@ Programa: `txoracle` v1.5.2
 - **ProofNode**: hash ([u8; 32]), isRightSibling (bool)
 - **ServiceRow**: rowId (u16), pricePerWeekToken (u64), samplingIntervalSec (u32), leagueBundleId (i16), marketBundleId (i16)
 - **FaucetTracker**: last_request_time (i64) — rate limit tracker per-user
-- **OrderIntent**: maker, intentId, depositAmount, remainingAmount, odds, termsHash, fixtureId, period, expirationTs, state, bump
-- **MatchedTrade**: tradeId, maker, taker, stakeMaker, stakeTaker, termsHash, state, bump
-- **TradeEscrow**: tradeId, traderA, traderB, stakeA, stakeB, tradeTermsHash, state, bump, createdAt, expiresAt, feeAmount, padding
-- **MarketIntentParams**: fixtureId, period, statAKey, statBKey?, predicate, op?, negation
-- **TraderPredicate**: threshold (i32), comparison (GreaterThan | LessThan | EqualTo)
-- **BinaryExpression**: Add | Subtract
 
 ---
 
@@ -134,7 +360,7 @@ Programa: `txoracle` v1.5.2
 
 ### instruction: `request_devnet_faucet`
 
-Pide USDT gratis en devnet. Sin args. Limitado a 1 request cada 8 horas por wallet (el programa trackea `FaucetTracker` por usuario).
+Pide USDT gratis en devnet. Sin args. Limitado a 1 request cada 8 horas por wallet.
 
 **Accounts:**
 
@@ -153,15 +379,9 @@ Pide USDT gratis en devnet. Sin args. Limitado a 1 request cada 8 horas por wall
 - `faucet_tracker`: `["faucet_tracker", user.toBuffer()]`
 - `usdt_treasury`: `["usdt_treasury"]`
 
-**Código de referencia:** `src/lib/txlineProgram.ts`
+**Código:** `src/lib/txlineProgram.ts`
 
 ```typescript
-import { Connection, PublicKey, Transaction, SystemProgram } from '@solana/web3.js';
-import {
-  TOKEN_PROGRAM_ID, ASSOCIATED_TOKEN_PROGRAM_ID,
-  getAssociatedTokenAddressSync, createAssociatedTokenAccountInstruction,
-} from '@solana/spl-token';
-
 const TXLINE_PROGRAM_ID = new PublicKey('6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J');
 const USDT_MINT = new PublicKey('ELWTKspHKCnCfCiCiqYw1EDH77k8VCP74dK9qytG2Ujh');
 
@@ -193,8 +413,6 @@ export async function requestUsdtFaucet(
   const userUsdtAta = getUserUsdtAta(user);
 
   const tx = new Transaction();
-
-  // Create ATA if it doesn't exist
   const ataInfo = await connection.getAccountInfo(userUsdtAta);
   if (!ataInfo) {
     tx.add(createAssociatedTokenAccountInstruction(
@@ -220,7 +438,6 @@ export async function requestUsdtFaucet(
   tx.feePayer = user;
   const { blockhash } = await connection.getLatestBlockhash();
   tx.recentBlockhash = blockhash;
-
   const signedTx = await wallet.signTransaction(tx);
   const sig = await connection.sendRawTransaction(signedTx.serialize());
   await connection.confirmTransaction(sig, 'confirmed');
@@ -232,35 +449,22 @@ export async function requestUsdtFaucet(
 
 ## PDA Derivation
 
-Todas las PDAs se derivan con `programId` según el network. Usar `6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J` para devnet, `9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA` para mainnet.
+Todas las PDAs se derivan con `programId` según el network.
 
 > **⚠️ Token program:** En devnet el USDT es classic SPL Token → usar `TOKEN_PROGRAM_ID`.  
 > En mainnet el TxL token es Token-2022 → usar `TOKEN_2022_PROGRAM_ID` para TxL.
 
 ```typescript
-import { PublicKey } from "@solana/web3.js";
-import { getAssociatedTokenAddressSync, TOKEN_PROGRAM_ID, TOKEN_2022_PROGRAM_ID } from "@solana/spl-token";
-
-const programId = new PublicKey("9ExbZjAapQww1vfcisDmrngPinHTEfpjYRWMunJgcKaA"); // mainnet
-// Devnet: programId = new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J");
+const programId = new PublicKey("6pW64gN1s2uqjHkn1unFeEjAwJkPGHoppGvS715wyP2J"); // devnet
 
 // Token Treasury PDA — owns the vault that collects subscription fees (TxL)
 const [tokenTreasuryPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("token_treasury_v2")], programId
 );
-const txlTokenMint = new PublicKey("Zhw9TVKp68a1QrftncMSd6ELXKDtpVMNuMGr1jNwdeL"); // mainnet
-const tokenTreasuryVault = getAssociatedTokenAddressSync(
-  txlTokenMint, tokenTreasuryPda, true, TOKEN_2022_PROGRAM_ID
-);
 
-// USDT Treasury PDA — owns the vault that collects USDT
+// USDT Treasury PDA
 const [usdtTreasuryPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("usdt_treasury")], programId
-);
-const usdtMint = new PublicKey("Es9vMFrzaCERmJfrF4H2FYD4KCoNkY11McCe8BenwNYB"); // mainnet
-// On devnet: usdtMint = new PublicKey("ELWTKspHKCnCfCiCiqYw1EDH77k8VCP74dK9qytG2Ujh")
-const usdtTreasuryVault = getAssociatedTokenAddressSync(
-  usdtMint, usdtTreasuryPda, true, TOKEN_PROGRAM_ID  // classic SPL Token
 );
 
 // Faucet Tracker PDA — per-user rate limit (devnet only)
@@ -268,13 +472,12 @@ const [faucetTrackerPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("faucet_tracker"), user.toBuffer()], programId
 );
 
-// Pricing Matrix PDA — service tier pricing
+// Pricing Matrix PDA
 const [pricingMatrixPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("pricing_matrix")], programId
 );
 
 // Daily Scores Roots PDA — validate scores data
-const epochDay = Math.floor(Date.now() / (24 * 60 * 60 * 1000));
 const [dailyScoresPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("daily_scores_roots"), new Uint8Array(new Uint16Array([epochDay]).buffer)],
   programId
@@ -323,7 +526,6 @@ Solo los tiers 1 y 12 existen en Devnet.
 
 ```typescript
 const authResponse = await axios.post("https://txline-dev.txodds.com/auth/guest/start");
-// mainnet: https://txline.txodds.com/auth/guest/start
 const jwt = authResponse.data.token; // expires in 30 days
 ```
 
@@ -331,7 +533,7 @@ const jwt = authResponse.data.token; // expires in 30 days
 
 ```typescript
 const txSig = await program.methods
-  .subscribe(SERVICE_LEVEL_ID, DURATION_WEEKS) // DURATION_WEEKS must be multiple of 4
+  .subscribe(SERVICE_LEVEL_ID, DURATION_WEEKS)
   .accounts({
     user: provider.wallet.publicKey,
     pricingMatrix: pricingMatrixPda,
@@ -380,20 +582,20 @@ X-Api-Token: ${apiToken}
 
 ## API Reference
 
-Todas las rutas usan base URL `https://txline.txodds.com` (mainnet) o `https://txline-dev.txodds.com` (devnet).
+Base URL: `https://txline.txodds.com` (mainnet) o `https://txline-dev.txodds.com` (devnet).
 
 ### Authentication
 
 | Método | Ruta | Descripción |
-|---|---|---|
+|--------|------|-------------|
 | POST | `/auth/guest/start` | Inicia sesión guest, devuelve JWT |
 | POST | `/api/token/activate` | Activa suscripción, devuelve API token |
 
 ### Fixtures
 
 | Método | Ruta | Parámetros | Descripción |
-|---|---|---|---|
-| GET | `/api/fixtures/snapshot` | `?startEpochDay=&competitionId=` | Último snapshot de fixtures |
+|--------|------|------------|-------------|
+| GET | `/api/fixtures/snapshot` | `?startEpochDay=&competitionId=&fixtureId=` | Último snapshot de fixtures |
 | GET | `/api/fixtures/updates/{epochDay}/{hourOfDay}` | path params | Updates de un fixture en un día |
 | GET | `/api/fixtures/validation` | `?fixtureId=&timestamp=` | Merkle proof para un fixture |
 | GET | `/api/fixtures/batch-validation` | `?epochDay=&hourOfDay=` | Merkle proof para batch horario |
@@ -401,7 +603,7 @@ Todas las rutas usan base URL `https://txline.txodds.com` (mainnet) o `https://t
 ### Odds
 
 | Método | Ruta | Parámetros | Descripción |
-|---|---|---|---|
+|--------|------|------------|-------------|
 | GET | `/api/odds/snapshot/{fixtureId}` | `?asOf=` | Latest odds snapshot (live o historical) |
 | GET | `/api/odds/live/{fixtureId}` | — | Live odds del fixture actual |
 | GET | `/api/odds/stream` | — | SSE stream de odds en tiempo real |
@@ -411,20 +613,36 @@ Todas las rutas usan base URL `https://txline.txodds.com` (mainnet) o `https://t
 ### Scores
 
 | Método | Ruta | Parámetros | Descripción |
-|---|---|---|---|
-| GET | `/api/scores/snapshot/{fixtureId}` | `?asOf=` | Latest scores snapshot |
+|--------|------|------------|-------------|
+| GET | `/api/scores` | `?FixtureId=x,y,z&Ts=0` | Historial + estado actual de fixtures específicos |
+| GET | `/api/scores/snapshot/{fixtureId}` | `?asOf=` | Latest scores snapshot (estado actual) |
 | GET | `/api/scores/updates/{fixtureId}` | — | Live scores updates del fixture |
 | GET | `/api/scores/historical/{fixtureId}` | — | Secuencia histórica completa (2 weeks - 6 hours ago) |
 | GET | `/api/scores/updates/{epochDay}/{hourOfDay}/{interval}` | path params | Scores históricos (5-min interval) |
-| GET | `/api/scores/stream` | — | SSE stream de scores en tiempo real |
+| GET | `/api/scores/stream` | — | **SSE stream** de scores en tiempo real |
 | GET | `/api/scores/stat-validation` | `?fixtureId=&seq=&statKey=&statKey2=` | Merkle proof 3-stage para stat(s) |
+
+**Nota**: El endpoint `/scores?Ts=0&FixtureId=x,y,z` devuelve historial completo (no solo el estado actual), a diferencia de otros endpoints. Usar `/scores/snapshot/{id}` para estado actual.
+
+### Purchase
+
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | `/api/guest/purchase/quote` | Solicita quote para comprar TxL con USDT |
 
 ---
 
-## Streaming (Server-Sent Events)
+## SSE Streaming
+
+### Scores Stream
+
+Endpoint: `GET /api/scores/stream`
+
+Los mensajes SSE tienen prefijo `data:` y contienen la estructura `FixtureInfo` + `Update`.
+
+Para reducir bandwidth ~70-80%, agregar header `Accept-Encoding: gzip`.
 
 ```typescript
-const streamUrl = "https://txline-dev.txodds.com/api/odds/stream";
 const response = await fetch(streamUrl, {
   headers: {
     Authorization: `Bearer ${jwt}`,
@@ -434,17 +652,8 @@ const response = await fetch(streamUrl, {
   },
 });
 const reader = response.body!.getReader();
-const decoder = new TextDecoder();
-while (true) {
-  const { value, done } = await reader.read();
-  if (done) break;
-  const chunk = decoder.decode(value);
-  // process SSE lines
-}
+// decode + split by '\n' + filter 'data:' lines + JSON.parse
 ```
-
-Para scores: `GET /api/scores/stream` (misma mecánica).  
-Para reducir bandwidth ~70-80%, agregar header `Accept-Encoding: gzip`.
 
 ---
 
@@ -476,11 +685,6 @@ const stat1 = {
   eventStatRoot: v.eventStatRoot,
   statProof: v.statProof.map((n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling })),
 };
-const stat2 = v.statToProve2 ? {
-  statToProve: v.statToProve2,
-  eventStatRoot: v.eventStatRoot,
-  statProof: v.statProof2.map((n: any) => ({ hash: n.hash, isRightSibling: n.isRightSibling })),
-} : null;
 
 const [dailyScoresPda] = PublicKey.findProgramAddressSync(
   [Buffer.from("daily_scores_roots"), new BN(targetTs).toBuffer("le", 2)],
@@ -488,55 +692,54 @@ const [dailyScoresPda] = PublicKey.findProgramAddressSync(
 );
 
 const isValid = await program.methods
-  .validateStat(
-    new BN(targetTs), fixtureSummary, fixtureProof, mainTreeProof,
-    { threshold: 0, comparison: { greaterThan: {} } }, stat1, stat2,
-    stat2 ? { subtract: {} } : null
-  )
+  .validateStat(new BN(targetTs), fixtureSummary, fixtureProof, mainTreeProof,
+    { threshold: 0, comparison: { greaterThan: {} } }, stat1, null, null)
   .accounts({ dailyScoresMerkleRoots: dailyScoresPda })
   .preInstructions([ComputeBudgetProgram.setComputeUnitLimit({ units: 1_400_000 })])
   .view();
 ```
 
-### Fixture & Odds Validation
+### Fixture Validation (usado por settle_with_cpi)
 
 ```typescript
-// Fixture
-const fixtureVal = await httpClient.get("/api/fixtures/validation", { params: { fixtureId: 17271370 } });
+const fixtureVal = await httpClient.get("/api/fixtures/validation", {
+  params: { fixtureId: 17271370 }
+});
+
+// Llamada directa (view)
 const isValidFixture = await program.methods
-  .validateFixture(fixtureVal.data.snapshot, fixtureVal.data.summary,
-    fixtureVal.data.subTreeProof, fixtureVal.data.mainTreeProof)
+  .validateFixture(
+    fixtureVal.data.snapshot,
+    fixtureVal.data.summary,
+    fixtureVal.data.subTreeProof,
+    fixtureVal.data.mainTreeProof
+  )
   .accounts({ tenDailyFixturesRoots: tenDailyFixturesRootsPda })
   .view();
 
-// Odds
-const oddsVal = await httpClient.get("/api/odds/validation", { params: { messageId: "..." } });
-const isValidOdds = await program.methods
-  .validateOdds(new BN(ts), oddsVal.data.oddsSnapshot, oddsVal.data.summary,
-    oddsVal.data.subTreeProof, oddsVal.data.mainTreeProof)
-  .accounts({ dailyOddsMerkleRoots: dailyBatchRootsPda })
-  .view();
+// O via CPI desde settle_with_cpi:
+// settleWithCpi(score1, score2, ...fixtureData, ...summaryData, fixtureProof, mainTreeProof)
 ```
 
 ---
 
 ## Data Schemas
 
-### Fixture Response
+### Fixture Response (REST snapshot)
 
 ```typescript
 {
-  Ts: number;              // int64 — update timestamp (ms)
-  StartTime: number;       // int64 — match start time (ms)
-  Competition: string;
-  CompetitionId: number;   // int32
-  FixtureGroupId: number;  // int32
-  Participant1Id: number;  // int32
-  Participant1: string;
-  Participant2Id: number;  // int32
-  Participant2: string;
-  FixtureId: number;       // int64
-  Participant1IsHome: boolean;
+  Ts: number,                // update timestamp (ms)
+  StartTime: number,         // match start time (ms)
+  Competition: string,
+  CompetitionId: number,
+  FixtureGroupId: number,
+  Participant1Id: number,
+  Participant1: string,
+  Participant2Id: number,
+  Participant2: string,
+  FixtureId: number,
+  Participant1IsHome: boolean,
 }
 ```
 
@@ -544,18 +747,18 @@ const isValidOdds = await program.methods
 
 ```typescript
 {
-  FixtureId: number;       // int64
-  MessageId: string;
-  Ts: number;              // int64
-  Bookmaker: string;
-  BookmakerId: number;     // int32
-  SuperOddsType: string;
-  GameState?: string;
-  InRunning: boolean;
-  MarketParameters?: string;
-  MarketPeriod?: string;
-  PriceNames: string[];
-  Prices: number[];        // int32 — demargined prices
+  FixtureId: number,
+  MessageId: string,
+  Ts: number,
+  Bookmaker: string,
+  BookmakerId: number,
+  SuperOddsType: string,
+  GameState?: string,
+  InRunning: boolean,
+  MarketParameters?: string,
+  MarketPeriod?: string,
+  PriceNames: string[],
+  Prices: number[],       // int32 — demargined prices
 }
 ```
 
@@ -581,6 +784,22 @@ Ver documentación oficial:
 
 ---
 
+## Code References
+
+| Archivo | Descripción |
+|---------|-------------|
+| `src/lib/txlineProgram.ts` | Faucet USDT + PDAs + balance helpers |
+| `src/lib/txlineSkill.ts` | Cliente off-chain (JWT, API, SSE) |
+| `src/lib/keeper.ts` | Keeper bot: fetch Active escrows, validate fixture, settle_with_cpi |
+| `src/app/live/page.tsx` | SSE scores stream: `normalizeScoreEvent`, StatusId→name, minute calc, FixtureInfo caching |
+| `src/app/keeper/settle/route.ts` | Vercel endpoint para trigger manual/cron del keeper |
+| `src/components/LiveFeedItem.tsx` | Card con flags + period label + score + minuto |
+| `src/components/MarketCard.tsx` | Card de mercado con countdown + odds |
+| `src/app/faucet/page.tsx` | UI del faucet con quick-amount chips |
+| `src/components/BetSlipDrawer.tsx` | Integración con USDT mint para apuestas |
+
+---
+
 ## Progressive Disclosure
 
 Links oficiales:
@@ -597,12 +816,3 @@ Links oficiales:
 - **Football (NCAA FBS)**: https://txline-docs.txodds.com/documentation/scores/football-feed.md
 - **Schedule**: https://txline-docs.txodds.com/documentation/scores/schedule.md
 - **Odds Coverage**: https://txline-docs.txodds.com/documentation/odds/odds-coverage.md
-
-### Código de referencia en el proyecto
-
-| Archivo | Descripción |
-|---|---|
-| `src/lib/txlineProgram.ts` | Faucet USDT + PDAs + balance helpers |
-| `src/lib/txlineSkill.ts` | Cliente off-chain (JWT, API, SSE) |
-| `src/app/faucet/page.tsx` | UI del faucet con quick-amount chips |
-| `src/components/BetSlipDrawer.tsx` | Integración con USDT mint para apuestas |
