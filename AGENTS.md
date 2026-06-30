@@ -43,6 +43,11 @@ curl -X POST https://worldcup-hackathon.vercel.app/api/keeper/settle \
   -H "Authorization: Bearer <KEEPER_SECRET>"
 ```
 
+### ⚠️ Vercel Hobby plan limitation
+Hobby only allows **one daily cron job**. For auto-settlement every 5 min, either:
+- **Upgrade to Vercel Pro** ($20/mo), or
+- Use **Supabase Edge Function** (`supabase/functions/keeper/`) which has a more generous free tier (500k invocations/mo) and can be triggered via pg_cron
+
 ## Build flow
 1. `git add -A && git commit -m "..."` (if changes)
 2. `bun run deploy` — auto-detects Next.js, builds with Turbopack, deploys
