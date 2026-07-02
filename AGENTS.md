@@ -81,4 +81,11 @@ The keeper runs via **pg_cron** inside Supabase Postgres every 5 minutes:
   ```
 - The Supabase Edge Function (`supabase/functions/keeper/`) proxies to Vercel with no extra auth
 - If `TXLINE_API_TOKEN` env var is empty, the keeper auto-subscribes on-chain via `keeper-auth.ts`
+
+## Real-time settlement trigger (live page)
+The live page polls scores every 15s. When a fixture transitions to finished (StatusId 5/10/13), it calls:
+```
+POST /api/keeper/trigger-settle?fixtureId=X
+```
+This settles all active escrows for that fixture immediately. Lightweight auth via in-memory rate limiter (1 req/min per fixtureId). Reliable fallback is the 5-min cron.
 <!-- END:deploy-rules -->
