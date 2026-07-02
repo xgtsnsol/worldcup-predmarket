@@ -48,6 +48,10 @@ Hobby only allows **one daily cron job**. For auto-settlement every 5 min, eithe
 - **Upgrade to Vercel Pro** ($20/mo), or
 - Use **Supabase Edge Function** (`supabase/functions/keeper/`) which has a more generous free tier (500k invocations/mo) and can be triggered via pg_cron
 
+## Workflow
+1. After every functional change or feature implementation, **commit and deploy** immediately unless the user says otherwise.
+2. Commit message format: concise, in Spanish or English matching the change.
+
 ## Build flow
 1. `git add -A && git commit -m "..."` (if changes)
 2. `bun run deploy` — auto-detects Next.js, builds with Turbopack, deploys
