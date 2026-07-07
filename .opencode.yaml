@@ -1,0 +1,61 @@
+tasks:
+  - name: add_txline_token_to_userprofile
+    description: Add txline_api_token field to UserProfile struct and update IDL.
+    steps:
+      - edit_file:
+          target: programs/settlement/src/state.rs
+          addition: "    pub txline_api_token: String, // new field, max 256 bytes"
+          after_line: 37
+      - edit_file:
+          target: src/idl/settlement.json
+          addition: "\"txline_api_token\": {\"type\": \"string\", \"max_len\": 256},"
+          after_key: "UserProfile"
+  - name: create_set_txline_token_instruction
+    description: Implement set_txline_token instruction in Rust and update IDL.
+    steps:
+      - edit_file:
+          target: programs/settlement/src/instructions/mod.rs
+          addition: "pub mod set_txline_token;"
+      - edit_file:
+          target: programs/settlement/src/instructions/set_txline_token.rs
+          content: |
+            use anchor_lang::prelude::*;
+            use crate::state::UserProfile;
+            #[derive(Accounts)]
+            pub struct SetTxlineToken<'info> {
+                #[account(mut, has_one = authority)]
+                pub profile: Account<'info, UserProfile>,
+                pub authority: Signer<'info>,
+                pub system_program: Program<'info, System>,
+            }
+            pub fn set_txline_token(ctx: Context<SetTxlineToken>, token: String) -> Result<()> {
+                let profile = &mut ctx.accounts.profile;
+                profile.txline_api_token = token;
+                Ok(())
+            }
+      - edit_file:
+          target: src/idl/settlement.json
+          addition: "\"set_txline_token\": {\"accounts\": [\"profile\", \"authority\", \"system_program\"], \"args\": [{\"name\": \"token\", \"type\": \"string\"}] }"
+  - name: migrate_existing_profiles
+    description: Migration script to add empty token to existing profiles.
+    script: scripts/migrate_profiles.ts
+  - name: update_frontend_token_handling
+    description: Adjust frontend to read/write txline_api_token on-chain.
+    steps:
+      - edit_file:
+          target: src/lib/keeper-auth.ts
+          content: |
+            // Fetch txline_api_token from on-chain UserProfile and skip external prompt if present.
+            // Implementation will query the profile PDA and store token locally if missing.
+  - name: refactor_notification_logic
+    description: Ensure notifications only for start, end, and bet outcome, with USA goal handling.
+    steps:
+      - edit_file:
+          target: src/context/MatchWatcherContext.tsx
+          content: |
+            // Adjust notification triggers to send push only on match start, match end, or bet outcome.
+            // Include special handling for USA goal notifications.
+  - name: fix_fixture_18193785_bug
+    description: Re‑run fixture status after fixing TxLINE 403 and verify correct settlement.
+    steps:
+      - run_command: "bun run dev"
